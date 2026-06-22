@@ -12,10 +12,16 @@ collected deterministically from the notes the agent actually read.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated, TypedDict
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_openai import ChatOpenAI
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
@@ -27,23 +33,31 @@ from .tools import build_tools
 from .vault import Vault
 
 SYSTEM_PROMPT = """\
-You are a research assistant working over the user's Obsidian vault of company \
-notes. The notes are interconnected via [[wikilinks]] and #tags.
+You are a research assistant over the user's Obsidian vault: Markdown notes \
+linked by [[wikilinks]] and labeled with #tags and YAML `tags:` frontmatter. You \
+can only READ the vault through the provided tools; you cannot see any note you \
+have not read.
 
-Your job: answer the user's question using ONLY information found in the vault.
+Answer ONLY from the vault. Workflow:
+1. EXPLORE to find candidates: `search_notes` for content, `search_by_tag` for \
+topics, `glob_notes` / `list_dir` for structure. Narrow before you read.
+2. READ candidates with `read_note` before making any claim. Never guess.
+3. Follow [[wikilinks]] or `get_backlinks` only when they add needed context.
+4. STOP as soon as the notes you have read answer the question. Don't over-explore.
 
-How to work:
-1. Use the tools to explore. Typically: `search_notes` (or `search_by_tag`) to \
-find candidates, `read_note` to read them in full, and `get_backlinks` / follow \
-[[wikilinks]] to gather related context.
-2. Read the actual note contents before answering. Do not guess.
-3. If the notes do not contain the answer, say so plainly rather than inventing it.
+Tool output is bounded to protect a limited context window:
+- Search/list tools may end with "(showing N of M)". If you need more, narrow the \
+query or use a more specific tool — don't assume hidden items are irrelevant.
+- `read_note` reports the note's total size; for a long note it returns a window \
+plus a "[more: ...]" hint. Call `read_note` again with `offset`/`limit` ONLY if \
+the missing part likely matters.
 
 How to answer:
-- Be concise and concrete.
-- Cite the relative path of every note you rely on, inline, like \
+- Be concise and concrete; quote or closely paraphrase the notes.
+- Cite the relative path of each note you relied on, inline, like \
 (source: folder/Note.md), next to the claim it supports.
-- Prefer quoting or closely paraphrasing the notes over speculation.
+- Cite ONLY notes you actually read with `read_note`.
+- If the vault lacks the answer, say so plainly rather than inventing it.
 """
 
 
@@ -53,6 +67,9 @@ class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
 
 
+MAX_HISTORY_MESSAGES = 12  # carried-forward chat memory cap (~6 Q&A turns)
+
+
 @dataclass
 class AgentResult:
     """Outcome of an agent run."""
@@ -60,6 +77,7 @@ class AgentResult:
     answer: str
     references: list[str]
     truncated: bool  # True if the loop hit its iteration limit
+    messages: list[BaseMessage] = field(default_factory=list)  # full run transcript
 
 
 def build_graph(settings: Settings, vault: Vault, llm=None):
@@ -108,6 +126,27 @@ def _collect_references(messages: list[BaseMessage]) -> list[str]:
     return refs
 
 
+def trim_history(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Reduce a finished run to lean prior context for the next chat turn.
+
+    Keeps the question/answer transcript and drops the bulky act/observe
+    scratchpad so a multi-turn session stays small on a limited context window:
+
+    * KEEP ``HumanMessage`` and final ``AIMessage`` (no tool calls).
+    * DROP ``SystemMessage`` (re-added each turn), ``ToolMessage``, and any
+      ``AIMessage`` that carried tool calls.
+
+    Only the most recent ``MAX_HISTORY_MESSAGES`` are retained.
+    """
+    kept: list[BaseMessage] = []
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            kept.append(msg)
+        elif isinstance(msg, AIMessage) and not msg.tool_calls:
+            kept.append(msg)
+    return kept[-MAX_HISTORY_MESSAGES:]
+
+
 def _final_answer(messages: list[BaseMessage]) -> str:
     """Return the content of the last AI message (the agent's final answer)."""
     for msg in reversed(messages):
@@ -122,13 +161,15 @@ def run_agent(
     settings: Settings,
     on_event: Callable[[str, object], None] | None = None,
     llm=None,
+    history: list[BaseMessage] | None = None,
 ) -> AgentResult:
     """Run the agent loop for ``query`` and return the answer plus references.
 
     The graph is streamed once in ``updates`` mode; messages are accumulated as
     they arrive (so the loop runs exactly once). ``on_event(node, payload)`` is
     invoked for each step when provided, so callers can render the loop verbosely.
-    ``llm`` lets tests inject a fake chat model.
+    ``llm`` lets tests inject a fake chat model. ``history`` carries prior chat
+    turns (see :func:`trim_history`); references reflect only the current turn.
     """
     vault = Vault(settings.resolved_vault())
     graph, _ = build_graph(settings, vault, llm=llm)
@@ -136,6 +177,7 @@ def run_agent(
     inputs = {
         "messages": [
             SystemMessage(content=SYSTEM_PROMPT),
+            *(history or []),
             HumanMessage(content=query),
         ]
     }
@@ -143,6 +185,7 @@ def run_agent(
     config = {"recursion_limit": settings.max_iterations * 2 + 1}
 
     messages: list[BaseMessage] = list(inputs["messages"])
+    turn_start = len(messages)  # references/answer come from this turn's messages
     truncated = False
     try:
         for update in graph.stream(inputs, config=config, stream_mode="updates"):
@@ -154,7 +197,8 @@ def run_agent(
     except GraphRecursionError:
         truncated = True
 
-    answer = _final_answer(messages)
+    new_messages = messages[turn_start:]
+    answer = _final_answer(new_messages)
     if truncated and not answer:
         answer = (
             "I reached the tool-call limit before finishing. Try a narrower "
@@ -162,6 +206,7 @@ def run_agent(
         )
     return AgentResult(
         answer=answer,
-        references=_collect_references(messages),
+        references=_collect_references(new_messages),
         truncated=truncated,
+        messages=messages,
     )

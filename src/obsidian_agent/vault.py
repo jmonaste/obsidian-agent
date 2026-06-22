@@ -15,6 +15,12 @@ from pathlib import Path
 _WIKILINK_RE = re.compile(r"\[\[([^\]\|#]+)(?:#[^\]\|]+)?(?:\|[^\]]+)?\]\]")
 # #tag (not inside a word, not a markdown heading). Allows nested a/b and hyphens.
 _TAG_RE = re.compile(r"(?:^|(?<=\s))#([A-Za-z0-9_][A-Za-z0-9_/\-]*)")
+# Leading YAML frontmatter block delimited by --- ... ---
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+# A `tags:` (or `tag:`) key line inside that block.
+_FM_TAGS_RE = re.compile(r"^tags?\s*:\s*(.*)$", re.IGNORECASE)
+# A `- item` entry in a YAML block list.
+_FM_LIST_ITEM_RE = re.compile(r"^\s*-\s*(.+?)\s*$")
 
 
 class VaultError(Exception):
@@ -88,6 +94,43 @@ def parse_wikilinks(text: str) -> list[str]:
     return [m.group(1).strip() for m in _WIKILINK_RE.finditer(text)]
 
 
+def _frontmatter_tags(text: str) -> set[str]:
+    """Return tags declared in a leading YAML frontmatter ``tags:`` key.
+
+    Handles a flow list (``tags: [a, b]``), a comma/space string
+    (``tags: a, b``), and a YAML block list (``tags:`` then ``- a`` lines).
+    """
+    block = _FRONTMATTER_RE.match(text)
+    if not block:
+        return set()
+    tags: set[str] = set()
+    lines = block.group(1).splitlines()
+    for idx, line in enumerate(lines):
+        key = _FM_TAGS_RE.match(line)
+        if not key:
+            continue
+        rest = key.group(1).strip()
+        if rest:
+            for part in re.split(r"[,\s]+", rest.strip("[]")):
+                cleaned = part.strip().strip("'\"").lstrip("#")
+                if cleaned:
+                    tags.add(cleaned)
+        else:  # block list: indented "- item" lines that follow
+            for follow in lines[idx + 1:]:
+                item = _FM_LIST_ITEM_RE.match(follow)
+                if not item:
+                    break
+                cleaned = item.group(1).strip().strip("'\"").lstrip("#")
+                if cleaned:
+                    tags.add(cleaned)
+    return tags
+
+
 def parse_tags(text: str) -> set[str]:
-    """Return the set of ``#tags`` in ``text`` (without the leading ``#``)."""
-    return {m.group(1) for m in _TAG_RE.finditer(text)}
+    """Return all tags in ``text`` (without the leading ``#``).
+
+    Combines inline ``#tags`` with any tags declared in YAML frontmatter, so
+    notes that label themselves via Obsidian properties are still discoverable.
+    """
+    inline = {m.group(1) for m in _TAG_RE.finditer(text)}
+    return inline | _frontmatter_tags(text)

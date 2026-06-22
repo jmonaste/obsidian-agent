@@ -107,18 +107,34 @@ python -m obsidian_agent.cli "How do we onboard a new operations vendor?"
 
 Output: a grounded answer followed by a `References:` list of note paths.
 
+### Interactive chat
+
+Use `--chat` (or `-c`) for a multi-turn session that remembers the conversation,
+so you can ask follow-up questions:
+
+```bash
+obsidian-agent --chat --vault /path/to/Vault
+```
+
+In the REPL: type a question, `/reset` clears the memory, and `/exit` (or
+Ctrl-D) quits. To keep the context window small, only the question/answer
+transcript is carried forward (the last ~6 turns); bulky tool output from prior
+turns is dropped.
+
 ## Tools the agent can use
 
 | Tool | Purpose |
 |------|---------|
 | `list_dir` | List folders/notes in a vault folder. |
 | `glob_notes` | Find notes by filename pattern. |
-| `search_notes` | Grep note content (substring or regex). |
-| `read_note` | Read a note in full (primary evidence). |
+| `search_notes` | Grep note content (substring or regex), capped per file so results span more notes. |
+| `read_note` | Read a note as evidence; long notes are paged (`offset`/`limit`) with a `[more: ...]` hint instead of silently truncated. |
 | `get_backlinks` | Notes linking to a note via `[[wikilink]]`. |
-| `search_by_tag` | Notes containing a `#tag`. |
+| `search_by_tag` | Notes carrying a tag, from inline `#tags` **or** YAML `tags:` frontmatter. |
 
-All tools are **read-only** and sandboxed to the vault root.
+All tools are **read-only** and sandboxed to the vault root. Listing/search
+output is bounded (with a `(showing N of M)` footer) so a large vault can't
+overflow a limited context window.
 
 ## Development
 
