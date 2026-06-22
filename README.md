@@ -26,11 +26,52 @@ Built with a manual LangGraph `StateGraph` + `ToolNode`:
 
 ## Setup
 
-Requires [uv](https://docs.astral.sh/uv/) and Python 3.12+.
+Requires Python 3.12+. Pick whichever package manager your machine allows.
+
+### Option A — pip + venv (works on restricted / corporate laptops)
 
 ```bash
-uv sync                 # create .venv and install deps
-cp .env.example .env    # then edit .env
+python -m venv .venv
+# Windows:        .venv\Scripts\activate
+# macOS / Linux:  source .venv/bin/activate
+
+python -m pip install --upgrade pip
+pip install -r requirements.txt   # runtime deps
+pip install -e . --no-deps        # install the CLI itself (no re-resolve)
+
+cp .env.example .env              # then edit .env  (Windows: copy .env.example .env)
+```
+
+For development extras (tests):
+
+```bash
+pip install -e ".[dev]"
+```
+
+> **Behind a corporate proxy / internal index?** Point pip at your mirror, e.g.
+> `pip install -r requirements.txt --index-url https://<your-artifactory>/api/pypi/pypi/simple`.
+> If SSL inspection breaks TLS, add `--trusted-host <host>`. To make it permanent
+> put those under `[global]` in `pip.conf` (`~/.config/pip/pip.conf` on
+> macOS/Linux, `%APPDATA%\pip\pip.ini` on Windows).
+
+### Option B — conda / miniforge
+
+```bash
+conda create -n obsidian-agent python=3.12 -y
+conda activate obsidian-agent
+pip install -r requirements.txt
+pip install -e . --no-deps
+cp .env.example .env
+```
+
+> miniforge defaults to conda-forge; `pip` inside the env will still respect any
+> corporate `pip.conf` index settings described above.
+
+### Option C — uv (if available and unrestricted)
+
+```bash
+uv venv && uv pip install -e ".[dev]"
+cp .env.example .env
 ```
 
 Fill in `.env`:
@@ -48,11 +89,20 @@ Fill in `.env`:
 
 ## Usage
 
+With the virtual environment activated, the `obsidian-agent` command is on your
+PATH:
+
 ```bash
-uv run obsidian-agent "How do we onboard a new operations vendor?"
+obsidian-agent "How do we onboard a new operations vendor?"
 
 # overrides + see the agent's tool calls live
-uv run obsidian-agent "..." --vault /path/to/Vault --model gpt-oss --max-iters 16 --verbose
+obsidian-agent "..." --vault /path/to/Vault --model gpt-oss --max-iters 16 --verbose
+```
+
+You can also invoke it without activating the env:
+
+```bash
+python -m obsidian_agent.cli "How do we onboard a new operations vendor?"
 ```
 
 Output: a grounded answer followed by a `References:` list of note paths.
@@ -73,7 +123,8 @@ All tools are **read-only** and sandboxed to the vault root.
 ## Development
 
 ```bash
-uv run pytest           # tool tests against a fixture vault
+pip install -e ".[dev]"   # once, to get pytest
+pytest                    # tool tests against a fixture vault
 ```
 
 ## Project layout
